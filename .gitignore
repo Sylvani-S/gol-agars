@@ -1,0 +1,5 @@
+lingeling
+output.txt
+*.cnf
+*.pyc
+__pycache__/*
