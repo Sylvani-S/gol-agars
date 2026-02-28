@@ -3,3 +3,4 @@ output.txt
 *.cnf
 *.pyc
 __pycache__/*
+.venv/*
