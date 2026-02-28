@@ -1,69 +1,50 @@
-
+from pysat.solvers import MinisatGH
 from pattern_basics import *
 import argparse as ap
 import bisector
 import sort_network
 import totalizer
-import subprocess
 import concurrent.futures
-import random
 
 NUM_INSTANCES = 8
 SOLVER_PATH = './lingeling' # Only lingeling has been tested, but other solvers might work. Please read the LLS tutorial on LifeWiki if you don't know where to obtain this file.
 CNF_PATH = './agar'
 
-def run_solver(solver_path, cnf_path, extra_args=None):
+def run_solver(cnf):
     """Runs a SAT solver subprocess and returns the model as a list of integers.
        Returns None if UNSAT."""
-    cmd = [solver_path, '--seed=' + str(random.randint(0, 2147483647)), cnf_path]
-
-    if extra_args:
-        cmd.extend(extra_args)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=60
-        )
-
-        output = result.stdout.splitlines()
-
-        if any("UNSAT" in line for line in output):
-            return None
-
-        model = []
-        for line in output:
-            if line.startswith("v") or (line and line[0] in "-0123456789"):
-                parts = line.replace("v", "").split()
-                for lit in parts:
-                    if lit == "0":
-                        break
-                    model.append(int(lit))
-
-        return model if model else None
-
-    except subprocess.TimeoutExpired:
-        return None
+    solver = MinisatGH(bootstrap_with=cnf)
+    return solver.get_model() if solver.solve() else None
 
 
-def run_parallel_solvers(solver_path, cnf_path, num_instances=4):
+def run_parallel_solvers(cnf, variables, num_instances=1):
     """Runs multiple solver instances in parallel and returns list of models."""
-    models = []
+    blocking_clauses = []
+    while True:
+        models = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_instances) as executor:
-        futures = [
-            executor.submit(run_solver, solver_path, cnf_path)
-            for _ in range(num_instances)
-        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_instances) as executor:
+            futures = [
+                executor.submit(run_solver, cnf + blocking_clauses)
+                for _ in range(num_instances)
+            ]
 
-        for future in concurrent.futures.as_completed(futures):
-            models.append(future.result())
-
-    return models
-
+            for future in concurrent.futures.as_completed(futures):
+                model = future.result()
+                if model: models.append(model)
+        
+        if not models:
+            break
+        unique_models = []
+        seen = set()
+        for m in models:
+            key = tuple(sorted(m))
+            if key not in seen:
+                seen.add(key)
+                unique_models.append(m)
+        for model in unique_models:
+            yield model
+            blocking_clauses.append([-m[variables[vec]-1] for vec in variables])
 def write_cnf(clauses, filename):
     """Write a list of clauses to a DIMACS CNF file."""
     max_var = 0
@@ -243,17 +224,9 @@ def periodic_agars(width, height, temp, xshift, yshift, period_func=None, lex_fu
         lex_clauses = list(lex_leq(base_vars, other_vars, instance=instance))
     
     mod.reset_var()
-    write_cnf(clauses+lex_clauses, CNF_PATH + "_agar.cnf")
-    model = run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_agar.cnf", num_instances=1)[0]
-    aux = []
-    while model is not None: 
-        models = run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_agar.cnf", num_instances=NUM_INSTANCES)
-        for m in models:
-            if m: 
-                yield (fund_domain, model_to_pattern(m, variables))
-                aux.append([-m[variables[vec]-1] for vec in variables])
-        write_cnf(clauses+lex_clauses+aux, CNF_PATH + "_agar.cnf")
-        model = models[0]
+    for m in run_parallel_solvers(clauses+lex_clauses, variables, num_instances=NUM_INSTANCES):
+        if m: 
+            yield (fund_domain, model_to_pattern(m, variables))
 
 def model_to_pattern(model, names):
     "Convert a model to a pattern or orbit."
@@ -293,7 +266,7 @@ def has_unique_periodic_orbit(temp_pat, width, height, temp, each, xper, yper, i
 
             mod.reset_var()
             write_cnf(clauses+lex_clauses+[diff_clause], CNF_PATH + "_uniq1.cnf")
-            if run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_uniq1.cnf", num_instances=1)[0] is not None:
+            if run_solver(clauses+lex_clauses+[diff_clause]) is not None:
                 return False
     else:
         variables = {(i,j,t) : mod.gen_var()
@@ -334,8 +307,7 @@ def has_unique_periodic_orbit(temp_pat, width, height, temp, each, xper, yper, i
                        for y in range(height*yper)]
 
         mod.reset_var()
-        write_cnf(clauses+lex_clauses+[diff_clause], CNF_PATH + "_uniq1.cnf")
-        if run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_uniq1.cnf", num_instances=1)[0] is not None:
+        if run_solver(clauses+lex_clauses+[diff_clause]) is not None:
             return False
     return True
 
@@ -362,8 +334,7 @@ def has_unique_extended_orbit(temp_pat, width, height, temp, padcol, padrow, eac
             diff_clause = [(-1 if temp_pat[i,j,(t-1)%temp] else 1)*variables[i,j]
                            for i in range(width)
                            for j in range(height)]
-            write_cnf(clauses+[diff_clause], CNF_PATH + "_uniq2.cnf")
-            if run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_uniq2.cnf", num_instances=1)[0] is not None:
+            if run_solver(clauses+[diff_clause]) is not None:
                 return False
     else:
         tiled = {(i,j) : temp_pat[i%width,j%height,0]
@@ -373,8 +344,7 @@ def has_unique_extended_orbit(temp_pat, width, height, temp, padcol, padrow, eac
         diff_clause = [(-1 if temp_pat[i,j,0] else 1)*variables[i,j]
                        for i in range(width)
                        for j in range(height)]
-        write_cnf(clauses+[diff_clause], CNF_PATH + "_uniq2.cnf")
-        if run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_uniq2.cnf", num_instances=1)[0] is not None:
+        if run_solver(clauses+[diff_clause]) is not None:
             return False
     return True
 
@@ -442,8 +412,7 @@ def common_forced_part(pats, temp, return_pat=False, chars="nfNF", hints=[], ins
             print("Pattern {}/{}, {} cells potentially forced".format(k+1, len(pats), len(maybe_forced)))
         clauses, variables = nth_preimage(pat, temp, hints=hints, instance=instance, rule=rule)
         
-        write_cnf(clauses, CNF_PATH + "_agar.cnf")
-        model = run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_agar.cnf", num_instances=1)[0]
+        model = run_solver(clauses)
         aux = []
         i = 0
         while model is not None:
@@ -455,8 +424,8 @@ def common_forced_part(pats, temp, return_pat=False, chars="nfNF", hints=[], ins
                 maybe_forced -= set(vec for vec in new if new[vec] != pre[vec])
             aux.append([(-1 if pre[vec] else 1)*variables[vec]
                                    for vec in maybe_forced])
-            model = run_parallel_solvers(SOLVER_PATH, CNF_PATH + "_agar.cnf", num_instances=1)[0]
-            write_cnf(clauses+aux, CNF_PATH + "_agar.cnf")
+            model = run_solver(clauses+aux)
+            
         if i == 0:
             # No preimages exist
             return None

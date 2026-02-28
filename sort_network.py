@@ -154,7 +154,7 @@ def local_preimage_var(cells, img, rule=([3],[2,3])):
 
 def local_fixp(cells, rule=([3],[2,3])):
     "Clauses for the local rule evaluating to the middle cell."
-    for clause in local_perimage_var(cells, cells[0], rule):
+    for clause in local_preimage_var(cells, cells[0], rule):
         yield clause
 
 def local_preimage(cells, val, rule=([3],[2,3])):
